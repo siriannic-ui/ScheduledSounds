@@ -25,6 +25,12 @@ class MainActivity : Activity() {
     private lateinit var timesList: LinearLayout
     private lateinit var weekdaysBox: CheckBox
     private lateinit var minutesField: EditText
+    private lateinit var errorText: TextView
+
+    override fun onResume() {
+        super.onResume()
+        refresh()
+    }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -36,6 +42,13 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(16), dp(16), dp(32))
         }
         setContentView(ScrollView(this).apply { addView(col) })
+
+        errorText = TextView(this).apply {
+            setTextIsSelectable(true)
+            setTextColor(0xFFB00020.toInt())
+            textSize = 13f
+        }
+        col.addView(errorText)
 
         fun label(text: String, size: Float = 16f) = TextView(this).apply {
             this.text = text
@@ -108,9 +121,18 @@ class MainActivity : Activity() {
         col.addView(Button(this).apply {
             text = "Play a random track for 10 seconds"
             setOnClickListener {
-                startForegroundService(
-                    Intent(this@MainActivity, PlayerService::class.java).putExtra("seconds", 10)
-                )
+                if (Prefs.folder(this@MainActivity) == null) {
+                    Toast.makeText(this@MainActivity, "Choose a music folder first", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                try {
+                    startForegroundService(
+                        Intent(this@MainActivity, PlayerService::class.java).putExtra("seconds", 10)
+                    )
+                } catch (e: Throwable) {
+                    Prefs.setLastError(this@MainActivity, "Could not start player: ${e.javaClass.simpleName}: ${e.message}")
+                    refresh()
+                }
             }
         })
 
@@ -133,6 +155,8 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
+        val err = Prefs.lastError(this)
+        errorText.text = if (err != null) "Last problem (long-press to copy):\n$err" else ""
         folderText.text = Prefs.folder(this)?.let { Uri.parse(it).lastPathSegment } ?: "(none chosen)"
         timesList.removeAllViews()
         val times = Prefs.times(this)

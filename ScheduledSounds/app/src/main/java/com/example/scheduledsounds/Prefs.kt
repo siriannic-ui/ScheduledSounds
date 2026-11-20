@@ -29,4 +29,7 @@ object Prefs {
 
     fun minutes(c: Context): Int = sp(c).getInt("minutes", 4)
     fun setMinutes(c: Context, v: Int) = sp(c).edit().putInt("minutes", v).apply()
+
+    fun lastError(c: Context): String? = sp(c).getString("lastError", null)
+    fun setLastError(c: Context, v: String?) = sp(c).edit().putString("lastError", v).commit()
 }

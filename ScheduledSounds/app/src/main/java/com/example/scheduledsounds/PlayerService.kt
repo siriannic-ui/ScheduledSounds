@@ -1,8 +1,10 @@
 package com.example.scheduledsounds
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -13,6 +15,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 
@@ -20,11 +24,18 @@ import androidx.documentfile.provider.DocumentFile
 class PlayerService : Service() {
 
     private var player: MediaPlayer? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Backup stop alarm fired: stop playback and quit.
+        if (intent?.action == ACTION_STOP) {
+            finish()
+            return START_NOT_STICKY
+        }
+
         // Must call startForeground quickly, so do it first and guard it.
         try {
             goForeground("Playing scheduled sound")
@@ -70,6 +81,7 @@ class PlayerService : Service() {
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build()
                 )
+                setWakeMode(this@PlayerService, PowerManager.PARTIAL_WAKE_LOCK)
                 setDataSource(this@PlayerService, file.uri)
                 setOnCompletionListener { finish() }
                 setOnErrorListener { _, what, extra ->
@@ -81,7 +93,13 @@ class PlayerService : Service() {
             }
             goForeground("Playing: ${file.name}")
             Prefs.setLastError(this, null)
+            // Keep the CPU awake so the stop timer runs while the screen is off.
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScheduledSounds:play").apply {
+                acquire(seconds * 1000L + 30_000L)
+            }
             handler.postDelayed({ finish() }, seconds * 1000L)
+            scheduleBackupStop(seconds)
         } catch (e: Throwable) {
             report("Playback failed", e)
             finish()
@@ -128,14 +146,39 @@ class PlayerService : Service() {
         }
     }
 
+    private fun stopIntent(): PendingIntent =
+        PendingIntent.getService(
+            this, 99,
+            Intent(this, PlayerService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+    /** A system alarm that stops playback even if the app's own timer is paused by sleep. */
+    private fun scheduleBackupStop(seconds: Int) {
+        try {
+            val am = getSystemService(ALARM_SERVICE) as AlarmManager
+            val at = SystemClock.elapsedRealtime() + seconds * 1000L + 2_000L
+            if (Scheduler.canScheduleExact(this)) {
+                am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, stopIntent())
+            } else {
+                am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, stopIntent())
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun stopPlayback() {
         handler.removeCallbacksAndMessages(null)
+        try { player?.stop() } catch (_: Throwable) {}
         try { player?.release() } catch (_: Throwable) {}
         player = null
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Throwable) {}
+        wakeLock = null
     }
 
     private fun finish() {
         stopPlayback()
+        try { (getSystemService(ALARM_SERVICE) as AlarmManager).cancel(stopIntent()) } catch (_: Throwable) {}
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
         stopSelf()
     }
@@ -148,5 +191,6 @@ class PlayerService : Service() {
     companion object {
         private const val CHANNEL = "playback"
         private const val ERR_CHANNEL = "errors"
+        const val ACTION_STOP = "com.example.scheduledsounds.STOP"
     }
 }
